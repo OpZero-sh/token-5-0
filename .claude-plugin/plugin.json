@@ -1,0 +1,8 @@
+{
+  "name": "token-5-0",
+  "description": "The token police. Patrols your context window, books oversized payloads into the vault, and keeps only tight summaries on the beat.",
+  "version": "1.0.0",
+  "author": {
+    "name": "jefestudio"
+  }
+}
