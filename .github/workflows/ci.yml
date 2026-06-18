@@ -1,13 +1,11 @@
 name: CI
 
-# Bespoke (not the reusable ci-node.yml) because this repo has two quirks the
-# generic caller does not handle:
-#   1. better-sqlite3 is a NATIVE addon — `npm ci` compiles it from source, so we
-#      verify the binding actually loads, not just that install succeeded.
-#   2. The MCP server is a long-running stdio process that never exits on its own
-#      (server.connect(transport) blocks forever). A plain `node dist/server.js`
-#      would hang CI, so we boot it, confirm it survives a few seconds without
-#      crashing, then kill it — pointed at a throwaway VAULT_DB_PATH.
+# Bespoke (not the reusable ci-node.yml) because better-sqlite3 is a NATIVE
+# addon: `npm ci` compiles it from source, so we verify the binding actually
+# loads, not just that install succeeded. The server is a stdio MCP process
+# (it exits on stdin EOF — there is no long-running daemon to smoke-boot in CI),
+# so the gates are install + native-binding load + typecheck + build. A real
+# MCP-handshake smoke test is a follow-up.
 
 on:
   push:
@@ -47,31 +45,3 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      # Boot the stdio MCP server against a temp DB. It never exits on its own,
-      # so we run it in the background, give it time to construct the SQLite vault
-      # and connect the transport, then assert it's still alive (didn't crash on
-      # boot) before tearing it down.
-      - name: Smoke-boot MCP server
-        run: |
-          set -euo pipefail
-          export VAULT_DB_PATH="$(mktemp -d)/vault.db"
-          echo "Booting with VAULT_DB_PATH=$VAULT_DB_PATH"
-          node dist/server.js &
-          SERVER_PID=$!
-          sleep 3
-          if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo "::error::MCP server exited during boot (crash)"
-            wait "$SERVER_PID" || true
-            exit 1
-          fi
-          echo "Server still alive after boot — OK"
-          if [ ! -f "$VAULT_DB_PATH" ]; then
-            echo "::error::Vault DB was not created at $VAULT_DB_PATH"
-            kill "$SERVER_PID" 2>/dev/null || true
-            exit 1
-          fi
-          echo "Vault DB created — OK"
-          kill "$SERVER_PID" 2>/dev/null || true
-          wait "$SERVER_PID" 2>/dev/null || true
-
