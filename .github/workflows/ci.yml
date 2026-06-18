@@ -1,0 +1,77 @@
+name: CI
+
+# Bespoke (not the reusable ci-node.yml) because this repo has two quirks the
+# generic caller does not handle:
+#   1. better-sqlite3 is a NATIVE addon — `npm ci` compiles it from source, so we
+#      verify the binding actually loads, not just that install succeeded.
+#   2. The MCP server is a long-running stdio process that never exits on its own
+#      (server.connect(transport) blocks forever). A plain `node dist/server.js`
+#      would hang CI, so we boot it, confirm it survives a few seconds without
+#      crashing, then kill it — pointed at a throwaway VAULT_DB_PATH.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22 matches @types/node ^22 and the native ABI better-sqlite3 builds against.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # npm ci compiles better-sqlite3 from source against this Node's ABI.
+      - name: Install dependencies (rebuilds native better-sqlite3)
+        run: npm ci
+
+      # Fail fast if the native binding can't be loaded after the rebuild.
+      - name: Verify native better-sqlite3 binding loads
+        run: node -e "const D=require('better-sqlite3'); const db=new D(':memory:'); db.exec('create table t(x)'); db.close(); console.log('better-sqlite3 OK');"
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+      # Boot the stdio MCP server against a temp DB. It never exits on its own,
+      # so we run it in the background, give it time to construct the SQLite vault
+      # and connect the transport, then assert it's still alive (didn't crash on
+      # boot) before tearing it down.
+      - name: Smoke-boot MCP server
+        run: |
+          set -euo pipefail
+          export VAULT_DB_PATH="$(mktemp -d)/vault.db"
+          echo "Booting with VAULT_DB_PATH=$VAULT_DB_PATH"
+          node dist/server.js &
+          SERVER_PID=$!
+          sleep 3
+          if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "::error::MCP server exited during boot (crash)"
+            wait "$SERVER_PID" || true
+            exit 1
+          fi
+          echo "Server still alive after boot — OK"
+          if [ ! -f "$VAULT_DB_PATH" ]; then
+            echo "::error::Vault DB was not created at $VAULT_DB_PATH"
+            kill "$SERVER_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Vault DB created — OK"
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
+
